@@ -1,0 +1,6 @@
+# PS sem pedidos em t=0 perde o saldo. A, que chega em t=1, espera t=5.
+RM;0;1
+P;2563EB;0;2;10;10
+PS1;9333EA;0;2;5;5
+A;15803D;1;2;0;10
+E;B45309;3;1;-12;10;0,12,25

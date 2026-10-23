@@ -14,12 +14,13 @@ class Candidata:
     prazo: int
     ingresso: int
     duracao: int
+    background: bool = False
 
 
 def _escolher(candidatas, sortear, prioridade):
     """Aplicar exatamente a ordem de desempates do item 4.3, após a prioridade."""
     def criterio(candidata):
-        return (prioridade(candidata), not candidata.executava,
+        return (candidata.background, prioridade(candidata), not candidata.executava,
                 candidata.prazo, candidata.ingresso, candidata.duracao)
 
     melhor = min(criterio(candidata) for candidata in candidatas)

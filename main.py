@@ -13,7 +13,7 @@ from exportacao_svg import gerar_svg, salvar_svg
 
 def main(argv=None):
     """Uma entrada reproduzível também permite verificar o executável empacotado."""
-    parser = argparse.ArgumentParser(description="Simulador didático de escalonamento RM/EDF")
+    parser = argparse.ArgumentParser(description="Simulador RM/EDF — Projeto B: tarefas e servidores")
     parser.add_argument("--sem-interface", metavar="CONFIG", help="executa o arquivo até o fim, sem abrir janela")
     parser.add_argument("--arquivo", help="abre a janela com uma configuração escolhida explicitamente")
     parser.add_argument("--saida", help="SVG de destino explícito; padrão: gantt.svg, sem sobrescrever")
@@ -38,6 +38,7 @@ def main(argv=None):
                 "situacao": estado["situacao"], "tempo": estado["tempo"],
                 "tarefas": [{"id": t["id"], "concluidas": t["concluidas"]} for t in estado["tarefas"]],
                 "perdas_de_prazo": sum(e["tipo"] == "prazo" for e in estado["eventos"]),
+                "admissao": estado["admissao"],
                 "svg": str(destino.resolve()), "avisos": estado["avisos"],
                 "executavel": sys.executable, "python": sys.version.split()[0],
                 "empacotado": bool(getattr(sys, "frozen", False)),

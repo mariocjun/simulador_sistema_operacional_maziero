@@ -1,4 +1,4 @@
-SIMULADOR RM/EDF — PROJETO A
+SIMULADOR RM/EDF — PROJETO B
 
 Como executar:
 
@@ -20,6 +20,8 @@ Uso da interface:
   Clique em "Carregar arquivo" e escolha um dos config-*.txt desta pasta.
   Use "Passo +1", "Voltar" ou "Completo".
   O Gantt pode ser salvo em SVG; por padrão ele é gerado diretamente nesta pasta (ou na pasta que você escolher).
+  O resumo e o cabeçalho do SVG mostram a quantidade de perdas de prazo do histórico exibido.
+  Havendo perdas, o aviso fica destacado em vermelho. "Concluída" não significa "sem perdas".
 
 Arquivos:
   .gitignore        — ignora arquivos temporários, caches e executáveis gerados.
@@ -29,12 +31,14 @@ Arquivos:
   modelos.py        — tarefa, instância periódica e estado da simulação.
   escalonadores.py   — escolha por RM/EDF e critérios de desempate.
   motor.py          — etapas de um tick e eventos de cada instante.
+  servidores.py     — fila de pedidos e capacidade de BS, PS, DS e SS.
+  admissao.py       — teste de escalonabilidade antes de aceitar a carga.
   historico.py      — registros, voltar/refazer e edições.
   api.py            — comandos e validações, sem dependência da interface.
   configuracao.py    — leitura do arquivo de entrada.
   exportacao_svg.py  — exportação do Gantt.
   interface_tk.py    — controles, tabelas e apresentação gráfica.
-  projetoA-simulador-escalonamento-v20261015.pdf — especificação oficial de requisitos do Projeto A (Prof. Dr. Marco Aurélio Wehrmeister).
+  projetoA-simulador-escalonamento-v20261015.pdf — especificação oficial dos Projetos A e B.
 
 No núcleo, cada objeto responde pelas informações que possui:
   Tarefa informa qual instância pode executar e se ainda pode liberar outras.
@@ -50,19 +54,73 @@ Quantum é lido, validado e preservado, sem rodízio em RM/EDF.
 Tick é a unidade do relógio; período determina novas ativações. Nenhum deles
 deve ser confundido com uma fatia de CPU (quantum). Reavaliar a cada tick não
 obriga trocar a tarefa.
-O experimento acompanha as primeiras dez instâncias por tarefa e conserva
-as atrasadas até terminarem. Término manual é uma intervenção distinta.
+Tarefas com período positivo executam dez vezes. Período zero indica uma
+aperiódica, ativada uma vez no ingresso. Período negativo indica esporádica:
+o módulo é o intervalo mínimo; lista_eventos contém os instantes relativos
+ao ingresso, em ordem crescente, separados por vírgulas. Por exemplo:
+  E;B45309;3;1;-12;10;0,12,25
+ativa E nos instantes 3, 15 e 28; cada ocorrência usa 1 tick e tem prazo 10.
+O período negativo permanece guardado no TCB. Intervalos menores que 12
+nesse exemplo são recusados com uma mensagem de erro.
+Tarefas atrasadas conservam trabalho pendente. Término manual é uma
+intervenção distinta, disponível para explorar o comportamento no debugger.
 Edições temporais afetam ativações futuras, não as instâncias já liberadas.
+
+Servidores (seção 2.8 do capítulo de escalonamento de tempo real):
+  IDs BS1, PS1, DS1, SS1 etc. identificam servidores; o sufixo é numérico.
+  Seus período, duração (capacidade) e prazo são positivos.
+  BS: atende somente nas CPUs que sobram; não limita o serviço por capacidade.
+  PS (Polling Server): repõe a capacidade a cada período. Sem pedidos,
+      descarta o saldo e espera a próxima reposição.
+  DS (Deferrable Server): conserva o saldo dentro do período. Na próxima
+      reposição recebe a capacidade original, sem acumular a sobra.
+  SS (Sporadic Server): conserva saldo. Repõe o consumo de cada intervalo
+      ativo em início_do_intervalo + período. Uma preempção por tarefa de
+      prioridade maior não separa o intervalo.
+  Em múltiplas CPUs, o intervalo SS está ativo enquanto SS executa ou todas
+  as CPUs executam prioridades pelo menos iguais à sua.
+  RM usa o período do servidor; EDF usa o prazo absoluto da janela da reserva.
+  BS sempre fica depois das tarefas periódicas e dos servidores com reserva.
+  Pedidos aperiódicos/esporádicos ficam numa fila global, em ordem de chegada.
+  O servidor selecionado retira um pedido, reservando-o exclusivamente.
+  Preempção mantém a reserva; conclusão, suspensão ou saldo esgotado a libera.
+  Servidores permanecem disponíveis até terminar a carga, inclusive pedidos
+  com ingresso tardio; não executam ciclos artificiais sem clientes.
+
+Admissão (item B.3):
+  Antes de carregar, adicionar ou alterar tempos/algoritmo/CPUs, a API simula
+  antecipadamente a carga configurada, em cópia do estado e do sorteio.
+  Inclui tarefas periódicas, aperiódicas, esporádicas e os quatro servidores.
+  Aceita somente se as ocorrências pendentes e futuras concluem nos prazos.
+  A recusa informa tarefa e instante; preserva a sessão que estava carregada.
+  O teste cobre a carga finita conhecida: dez ativações por periódica,
+  uma por aperiódica e a lista das esporádicas. Não é uma prova para infinitas
+  chegadas futuras desconhecidas. Novas inclusões exigem nova avaliação.
+  Suspender/terminar/forçar estados são intervenções explícitas de debugger
+  e invalidam a previsão anterior. O histórico restaura capacidade, pedidos,
+  reposições, sorteio e diagnóstico junto com o relógio.
+  Após a primeira ativação, tempos de servidores e listas esporádicas não
+  podem ser reescritos; a interface explica a necessidade de reiniciar.
+
+Exemplos:
+  config-projeto-b-bs.txt, config-projeto-b-ps.txt,
+  config-projeto-b-ds.txt, config-projeto-b-ss.txt.
+  Os exemplos periódicos anteriores continuam disponíveis. O arquivo
+  config-rm-fig26.txt demonstra uma recusa de admissão: RM perderia prazos.
+  config-edf-fig26.txt executa o mesmo conjunto com EDF sem perder prazos.
 
 Marcadores do Gantt:
 Na janela, Ativação marca cada ocorrência liberada e Fim de instância marca
 sua conclusão. No SVG, os nomes são Ativação e Conclusão de instância.
-Chegada indica adicionalmente a primeira ativação; Término da tarefa indica
-o encerramento após dez conclusões. Retomar depois de uma preempção continua
+Chegada indica o ingresso da tarefa; em esporádicas pode anteceder a primeira
+ativação, conforme os deslocamentos da lista. Término da tarefa indica
+o encerramento após as ocorrências previstas. Retomar depois de uma preempção continua
 a mesma ocorrência e não cria uma ativação nova.
 Os eventos são registrados nos seus instantes exatos. A nova ativação não
 apaga uma ocorrência atrasada.
 
 A quantidade de CPUs é configurável.
+O Gantt distingue a linha do servidor e a do pedido atendido, na mesma CPU.
+Reposição, esgotamento, atendimento e devolução também possuem marcadores.
 
 Todos os arquivos do projeto estão nesta pasta, sem subpastas.

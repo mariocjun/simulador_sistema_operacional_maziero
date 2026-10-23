@@ -1,4 +1,4 @@
-"""Leitura do formato textual do Projeto A, sem iniciar uma simulação."""
+"""Leitura do formato textual dos Projetos A/B, sem iniciar uma simulação."""
 
 from pathlib import Path
 import re
@@ -22,7 +22,7 @@ def _inteiro(texto: str, linha: int, campo: str, minimo: int = 0) -> int:
         valor = valor * 10 ** len(bloco) + int(bloco)
     if texto.startswith("-"):
         valor = -valor
-    if valor < minimo:
+    if minimo is not None and valor < minimo:
         raise _erro(linha, campo, f"o valor deve ser maior ou igual a {minimo}")
     return valor
 
@@ -31,9 +31,8 @@ def interpretar(texto: str) -> Configuracao:
     """Interpreta o arquivo inteiro; erros indicam a linha física e o campo.
 
     IDs e eventos preservam a grafia. Comparações de IDs usam casefold; nomes
-    de algoritmo e RGB são normalizados. Eventos são dados reservados ao
-    Projeto B. A API informa os avisos e ignora tarefas aperiódicas, por isso
-    nenhuma tarefa é descartada aqui.
+    de algoritmo e RGB são normalizados. Períodos negativos e a lista de
+    ocorrências esporádicas seguem os itens B.1.2 e B.1.3.
     """
     linhas = [
         (numero, linha.strip())
@@ -73,21 +72,25 @@ def interpretar(texto: str) -> Configuracao:
             raise _erro(numero, "cor", "use exatamente seis dígitos hexadecimais, sem prefixo #")
         cor = cor.upper()
         ingresso, duracao, periodo, prazo = (
-            _inteiro(valor, numero, nome)
+            _inteiro(valor, numero, nome, None if nome == "periodo" else 0)
             for nome, valor in zip(("ingresso", "duracao", "periodo", "prazo"), campos[2:6])
         )
-        if periodo > 0 and cor in cores_periodicas:
-            raise _erro(numero, "cor", f"RGB duplicado entre periódicas, já definido na linha {cores_periodicas[cor]}")
+        if cor in cores_periodicas:
+            raise _erro(numero, "cor", f"RGB duplicado, já definido na linha {cores_periodicas[cor]}")
         eventos = campos[6] if len(campos) == 7 else ""
         if eventos.endswith(";"):
             eventos = eventos[:-1].rstrip()
-        tarefas.append(DefinicaoTarefa(
+        definicao = DefinicaoTarefa(
             id=identidade, cor=cor, ingresso=ingresso, duracao=duracao,
             periodo=periodo, prazo=prazo, eventos=eventos,
-        ))
+        )
+        try:
+            definicao.deslocamentos()
+        except ErroSimulacao as erro:
+            raise _erro(numero, "lista_eventos", str(erro)) from erro
+        tarefas.append(definicao)
         ids[identidade.casefold()] = numero
-        if periodo > 0:
-            cores_periodicas[cor] = numero
+        cores_periodicas[cor] = numero
     return Configuracao(algoritmo=algoritmo, quantum=quantum, cpus=cpus, tarefas=tuple(tarefas))
 
 

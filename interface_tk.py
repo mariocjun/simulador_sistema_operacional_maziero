@@ -34,7 +34,13 @@ EVENTOS = {
     "sorteio": ("★", "Sorteio", "#7e22ce"),
     "preempcao": ("↔", "Preempção", "#a16207"),
     "manual": ("M", "Intervenção manual", "#9d174d"),
+    "reposicao": ("+", "Reposição de capacidade", "#0369a1"),
+    "esgotamento": ("∅", "Capacidade esgotada", "#b45309"),
+    "atendimento": ("→", "Atendimento de cliente", "#047857"),
+    "devolucao": ("↩", "Devolução de cliente", "#7e22ce"),
 }
+TIPOS = {"periodica": "Periódica", "aperiodica": "Aperiódica",
+         "esporadica": "Esporádica", "servidor": "Servidor"}
 
 
 def chave_natural(identificador):
@@ -54,7 +60,7 @@ def inteiro(texto, campo, minimo=0):
             valor = int(Decimal(texto.strip()))
         else:
             raise ValueError(f"{campo}: informe um número inteiro.") from None
-    if valor < minimo:
+    if minimo is not None and valor < minimo:
         raise ValueError(f"{campo}: o valor deve ser maior ou igual a {minimo}.")
     return valor
 
@@ -87,17 +93,42 @@ def cor_texto(cor):
 def tipo_resultado(estado):
     if estado["situacao"] != "concluida":
         return "parcial"
-    # Término manual não transforma trabalho pendente em dez conclusões.
-    if any(t["estado"] == "terminada" and t["concluidas"] < 10 for t in estado["tarefas"]):
+    # A meta varia por tipo; apenas a intervenção explícita é término manual.
+    if any(t.get("encerrada_manualmente", False) for t in estado["tarefas"]):
         return "encerrada-manualmente"
     return "concluida"
+
+
+def nome_tipo(tarefa):
+    tipo = tarefa.get("tipo", "periodica")
+    return ("Servidor " + tarefa.get("tipo_servidor", "")).strip() if tipo == "servidor" else TIPOS.get(tipo, tipo)
+
+
+def rotulo_execucao(tarefa):
+    """A CPU pertence ao servidor; o rótulo explicita quem recebe o serviço."""
+    cliente = tarefa.get("cliente")
+    return f"{tarefa['id']} → {cliente}" if cliente is not None else tarefa["id"]
+
+
+def texto_reposicoes(tarefa):
+    """Cada par público é (instante da reposição, quantidade de capacidade)."""
+    return "; ".join(f"t={texto(t)}: +{texto(c)}" for t, c in tarefa.get("reposicoes", [])) or "Nenhuma"
+
+
+def texto_admissao(estado):
+    admissao = estado.get("admissao")
+    if not admissao:
+        return "Admissão: ainda não informada."
+    aceita = {True: "aceita", False: "recusada", None: "não avaliada"}.get(admissao.get("aceita"), "não avaliada")
+    return (f"Admissão {aceita} · {admissao.get('metodo', '')} · fim previsto: "
+            f"{valor_visivel(admissao.get('tempo_final'))} · {admissao.get('detalhe', '')}")
 
 
 def comprimir_quadros(quadros):
     """Une intervalos adjacentes iguais, sem perder CPU, cor ou identidade antiga.
 
-    Cada faixa contém (início, fim, (estado, cpu, cor, id)). Não se cria um item
-    Canvas por tick. Lacunas e mudanças históricas continuam separadas.
+    A assinatura inclui tipo e vínculos históricos: trocar de cliente também
+    separa faixas. Não se cria um item Canvas por tick.
     """
     faixas = defaultdict(list)
 
@@ -114,13 +145,17 @@ def comprimir_quadros(quadros):
         tarefas = {t["chave"]: t for t in quadro["tarefas"]}
         for chave, tarefa in tarefas.items():
             adicionar(("tarefa", chave), tempo,
-                      (tarefa["estado"], tarefa["cpu"], tarefa["cor"], tarefa["id"]))
+                      (tarefa["estado"], tarefa["cpu"], tarefa["cor"], tarefa["id"],
+                       tarefa.get("tipo", "periodica"), tarefa.get("tipo_servidor", ""),
+                       tarefa.get("servidor"), tarefa.get("cliente")))
         for numero, chave in enumerate(quadro["cpus"], 1):
             if chave is None:
-                dados = ("desligada", numero, "CBD5E1", "")
+                dados = ("desligada", numero, "CBD5E1", "", "", "", None, None)
             else:
                 tarefa = tarefas[chave]
-                dados = ("executando", numero, tarefa["cor"], tarefa["id"])
+                dados = ("executando", numero, tarefa["cor"], tarefa["id"],
+                         tarefa.get("tipo", "periodica"), tarefa.get("tipo_servidor", ""),
+                         tarefa.get("servidor"), tarefa.get("cliente"))
             adicionar(("cpu", numero), tempo, dados)
     return dict(faixas)
 
@@ -179,10 +214,11 @@ class Gantt(ttk.Frame):
 
         legenda = ("Sólido + CPU: execução (C1 = CPU 1)   •   Contorno vazio: pronta   •   Pontos pretos: suspensa\n"
                    "Cinza pontilhado: CPU desligada   •   Traço cinza: ainda não chegou   •   ×: terminada\n"
+                   "Servidor: borda dupla   •   Cliente: cor pontilhada e borda tracejada   •   CPU: servidor → cliente\n"
                    + "   ·   ".join(f"{s} {nome}" for s, nome, _ in EVENTOS.values()))
         self.legenda = ttk.Label(self, text=legenda, wraplength=1100, justify="left")
         self.legenda.grid(row=4, column=0, columnspan=3, sticky="w", pady=(5, 0))
-        self.dica_padrao = "Passe o mouse sobre um intervalo ou símbolo para consultar os detalhes."
+        self.dica_padrao = "Passe o mouse sobre um intervalo ou símbolo para consultar os detalhes; aumente o zoom para ler rótulos longos."
         self.dica = tk.StringVar(self, self.dica_padrao)
         ttk.Label(self, textvariable=self.dica, wraplength=1100).grid(
             row=5, column=0, columnspan=3, sticky="w")
@@ -326,7 +362,7 @@ class Gantt(ttk.Frame):
                                          "Carregue um arquivo ou crie tarefas para começar.", tags="orientacao")
 
     def _intervalo(self, chave, y, inicio, fim, dados, esquerda, direita):
-        estado, cpu, cor, identificador = dados
+        estado, cpu, cor, identificador, tipo, tipo_servidor, servidor, cliente = dados
         x1 = max(esquerda - 5, inicio * self.escala)
         x2 = min(direita + 5, fim * self.escala)
         y1, y2 = y + 19, y + 43
@@ -335,9 +371,17 @@ class Gantt(ttk.Frame):
         itens = []
         texto, frente = "", "#475569"
         if estado == "executando":
-            itens.append(self.canvas.create_rectangle(x1, y1, x2, y2, fill=cor, outline=cor, tags=tags))
-            texto = f"CPU {cpu}" if chave[0] == "tarefa" else identificador
-            frente = cor_texto(cor)
+            opcoes = {"fill": cor, "outline": cor}
+            if tipo == "servidor":
+                opcoes.update(outline="#0f172a", width=2)
+            elif tipo in ("aperiodica", "esporadica"):
+                opcoes.update(stipple="gray25", outline=cor, width=2, dash=(4, 2))
+            itens.append(self.canvas.create_rectangle(x1, y1, x2, y2, tags=tags, **opcoes))
+            if tipo == "servidor" and x2 - x1 > 6:
+                itens.append(self.canvas.create_rectangle(x1 + 3, y1 + 3, x2 - 3, y2 - 3,
+                                                          outline="white", tags=tags))
+            texto = f"CPU {cpu}" if chave[0] == "tarefa" else rotulo_execucao({"id": identificador, "cliente": cliente})
+            frente = "#0f172a" if tipo in ("aperiodica", "esporadica") else cor_texto(cor)
         elif estado == "pronta":
             itens.append(self.canvas.create_rectangle(x1, y1, x2, y2, fill="", outline=cor, width=2, tags=tags))
         elif estado == "suspensa":
@@ -359,10 +403,23 @@ class Gantt(ttk.Frame):
         if estado == "executando" and chave[0] == "tarefa" and x2 - x1 <= 52:
             texto = f"C{cpu}"
         if texto and (x2 - x1 > 52 or (estado == "executando" and x2 - x1 >= 18)):
-            itens.append(self.canvas.create_text((x1 + x2) / 2, y + 31, text=texto,
-                                                 fill=frente, font=("Segoe UI", 9), tags=tags))
+            item = self.canvas.create_text((x1 + x2) / 2, y + 31, text=texto,
+                                            fill=frente, font=("Segoe UI", 9), tags=tags)
+            limites = self.canvas.bbox(item)
+            # O vínculo completo fica na dica mesmo quando o zoom é pequeno.
+            # Um nome longo não pode invadir o intervalo do próximo cliente.
+            if limites[0] < x1 or limites[2] > x2:
+                self.canvas.delete(item)
+            else:
+                itens.append(item)
         dica = (f"{identificador or 'CPU ' + str(cpu)} · [{inicio}, {fim}) · "
                 f"{ESTADOS.get(estado, estado)}" + (f" · CPU {cpu}" if cpu is not None else ""))
+        if tipo:
+            dica += " · " + nome_tipo({"tipo": tipo, "tipo_servidor": tipo_servidor})
+        if servidor is not None:
+            dica += f" · servidor: {servidor}"
+        if cliente is not None:
+            dica += f" · {identificador} → {cliente}"
         for item in itens:
             self._dicas[item] = dica
 
@@ -398,7 +455,7 @@ class Aplicacao:
         self._dialogo = None
         self._geracao = 0
         self._exportado = None
-        self.root.title("Simulador RM/EDF — laboratório de escalonamento")
+        self.root.title("Simulador RM/EDF — Projeto B")
         self.root.geometry("1280x860")
         self.root.minsize(980, 720)
         self.root.protocol("WM_DELETE_WINDOW", self.fechar)
@@ -420,7 +477,7 @@ class Aplicacao:
     def _construir(self):
         principal = ttk.Frame(self.root, padding=12)
         principal.pack(fill="both", expand=True)
-        ttk.Label(principal, text="Simulador RM / EDF", font=("Segoe UI", 17, "bold")).pack(anchor="w")
+        ttk.Label(principal, text="Simulador RM / EDF · Projeto B", font=("Segoe UI", 17, "bold")).pack(anchor="w")
         ttk.Label(principal, text="Explore prioridades, acompanhe cada instância e compare decisões no tempo.").pack(anchor="w")
         barra = ttk.Frame(principal)
         barra.pack(fill="x", pady=(10, 7))
@@ -457,6 +514,8 @@ class Aplicacao:
         ttk.Label(linha, text="Quantum é preservado, mas ignorado pelo escalonamento RM/EDF.").pack(side="left", padx=5)
         self.regra = tk.StringVar(self.root)
         ttk.Label(parametros, textvariable=self.regra, wraplength=1100).pack(anchor="w", pady=(5, 0))
+        self.admissao = tk.StringVar(self.root)
+        ttk.Label(parametros, textvariable=self.admissao, wraplength=1100).pack(anchor="w", pady=(3, 0))
 
         saida = ttk.Frame(principal)
         saida.pack(fill="x", pady=6)
@@ -465,8 +524,9 @@ class Aplicacao:
         ttk.Entry(saida, textvariable=self.destino, state="readonly").pack(side="left", fill="x", expand=True, padx=6)
         self._botao(saida, "Escolher pasta…", self.escolher_pasta)
         self.resumo = tk.StringVar(self.root, "Consultando sessão…")
-        ttk.Label(principal, textvariable=self.resumo, font=("Segoe UI", 11, "bold"),
-                  wraplength=1150).pack(anchor="w", pady=(0, 5))
+        self.rotulo_resumo = ttk.Label(principal, textvariable=self.resumo,
+                                      font=("Segoe UI", 12, "bold"), padding=(8, 6), wraplength=1134)
+        self.rotulo_resumo.pack(fill="x", pady=(0, 5))
 
         paineis = ttk.Panedwindow(principal, orient="vertical")
         paineis.pack(fill="both", expand=True)
@@ -494,12 +554,14 @@ class Aplicacao:
         entrada_cpu.pack(side="left", padx=(0, 10))
         self._controles.append((entrada_cpu, "normal"))
         self.termino = self._botao(acoes, "Terminar tarefa", lambda: self.alterar_estado("terminada"))
-        colunas = (("id", "ID", 65), ("chave", "Chave", 55), ("cor", "RGB", 75),
+        colunas = (("id", "ID", 65), ("tipo", "Tipo", 115), ("chave", "Chave", 55), ("cor", "RGB", 75),
                    ("estado", "Estado", 150), ("cpu", "CPU", 50), ("ingresso", "Ingresso", 65),
-                   ("duracao", "Duração", 65), ("periodo", "Período", 65), ("prazo", "Prazo relativo", 100),
-                   ("concluidas", "Concluídas / 10", 100), ("liberadas", "Liberadas", 70),
+                   ("duracao", "Duração / C", 90), ("periodo", "Período / P", 90), ("prazo", "Prazo relativo", 100),
+                   ("concluidas", "Concluídas / meta", 125), ("liberadas", "Liberadas", 70),
                    ("pendentes", "Pendentes", 75), ("execucao", "Ticks executados", 110),
-                   ("proxima_ativacao", "Próxima ativação", 115), ("eventos", "Eventos configurados", 180))
+                   ("proxima_ativacao", "Próxima ativação", 115), ("servidor", "Servidor", 85),
+                   ("cliente", "Cliente", 85), ("capacidade", "Saldo", 70),
+                   ("reposicoes", "Reposições (t: +saldo)", 200), ("eventos", "Offsets configurados", 180))
         self.tcb = self._tabela(aba_tcb, colunas)
         self.tcb.bind("<<TreeviewSelect>>", self._selecionar)
         self.tcb.bind("<Double-1>", lambda event: self.editar_tarefa())
@@ -511,7 +573,7 @@ class Aplicacao:
             ("restante", "Restante", 90), ("fim", "Concluída em", 100), ("perdeu_prazo", "Perdeu prazo?", 110),
             ("periodo", "Período original / RM", 145)))
         ttk.Label(aba_cpus, text="Alocação do retrato atual; o Gantt conserva as alocações dos intervalos anteriores.").pack(anchor="w")
-        self.tabela_cpus = self._tabela(aba_cpus, (("numero", "CPU", 90), ("tarefa", "Tarefa", 160),
+        self.tabela_cpus = self._tabela(aba_cpus, (("numero", "CPU", 90), ("tarefa", "Tarefa / servidor → cliente", 250),
                                                  ("estado", "Situação", 180)))
         self.tabela_eventos = self._tabela(aba_eventos, (("tempo", "Tempo", 70), ("tarefa", "Tarefa", 100),
             ("tipo", "Evento", 175), ("cpu", "CPU", 60), ("detalhe", "Motivo / detalhes", 650)))
@@ -590,13 +652,22 @@ class Aplicacao:
         self.algoritmo.set(estado["algoritmo"])
         self.cpus.set(texto(estado["quantidade_cpus"]))
         self.quantum.set(texto(estado["quantum"]))
-        self.regra.set("RM: menor período tem maior prioridade." if estado["algoritmo"] == "RM"
-                       else "EDF: a instância com o deadline absoluto mais próximo tem maior prioridade.")
+        self.regra.set(("RM: menor período tem maior prioridade." if estado["algoritmo"] == "RM"
+                       else "EDF: menor deadline da instância ou da reserva tem maior prioridade.")
+                       + " BS usa CPUs restantes; clientes executam pelo servidor.")
+        self.admissao.set(texto_admissao(estado))
         situacao = {"concluida": "Concluída", "interrompida": "Interrompida",
                     "em_andamento": "Em andamento"}.get(estado["situacao"], estado["situacao"])
         if tipo_resultado(estado) == "encerrada-manualmente":
-            situacao = "Encerrada com término manual (não equivale a dez conclusões)"
-        self.resumo.set(f"t = {texto(estado['tempo'])} ticks  ·  {situacao}  ·  "
+            situacao = "Encerrada com término manual (pode haver trabalho pendente)"
+        # Contar o histórico visível mantém o aviso correto ao voltar/refazer.
+        perdas = sum(evento["tipo"] == "prazo" for evento in estado["eventos"])
+        prazos = f"{texto(perdas)} {'perda' if perdas == 1 else 'perdas'} de prazo"
+        if perdas:
+            prazos = "ATENÇÃO: " + prazos
+        self.rotulo_resumo.configure(foreground="#b91c1c" if perdas else "#0f172a",
+                                    background="#fef2f2" if perdas else "#f1f5f9")
+        self.resumo.set(f"t = {texto(estado['tempo'])} ticks  ·  {situacao} — {prazos}  ·  "
                        f"{len(estado['tarefas'])} tarefas  ·  {estado['quantidade_cpus']} CPUs"
                        + (f"  ·  {estado['motivo']}" if estado["motivo"] else ""))
         selecionada = self.tcb.selection()
@@ -604,10 +675,13 @@ class Aplicacao:
         self._limpar(self.tcb)
         for t in sorted(estado["tarefas"], key=lambda t: chave_natural(t["id"]), reverse=True):
             progresso = sum(i["executado"] for i in t["instancias"])
+            meta = t.get("meta_instancias", 10)
+            concluidas = "—" if meta is None else f"{texto(t['concluidas'])} / {texto(meta)}"
             self._inserir(self.tcb, (
-                t["id"], t["chave"], t["cor"], ESTADOS.get(t["estado"], t["estado"]), valor_visivel(t["cpu"]),
-                t["ingresso"], t["duracao"], t["periodo"], t["prazo"], f"{t['concluidas']} / 10", t["liberadas"],
-                t["pendentes"], progresso, valor_visivel(t["proxima_ativacao"]), t["eventos"] or "Nenhum"), iid=str(t["chave"]))
+                t["id"], nome_tipo(t), t["chave"], t["cor"], ESTADOS.get(t["estado"], t["estado"]), t["cpu"],
+                t["ingresso"], t["duracao"], t["periodo"], t["prazo"], concluidas, t["liberadas"],
+                t["pendentes"], progresso, t["proxima_ativacao"], t.get("servidor"), t.get("cliente"),
+                t.get("capacidade"), texto_reposicoes(t), t["eventos"] or "Nenhum"), iid=str(t["chave"]))
         if selecionada and self.tcb.exists(selecionada[0]):
             self.tcb.selection_set(selecionada[0])
         elif self.tcb.get_children():
@@ -617,7 +691,7 @@ class Aplicacao:
         self._limpar(self.tabela_cpus)
         tarefas = {t["chave"]: t for t in estado["tarefas"]}
         for numero, chave in enumerate(estado["cpus"], 1):
-            self._inserir(self.tabela_cpus, (numero, tarefas[chave]["id"] if chave is not None else "—",
+            self._inserir(self.tabela_cpus, (numero, rotulo_execucao(tarefas[chave]) if chave is not None else "—",
                                             "Executando" if chave is not None else "Desligada"))
         self._limpar(self.tabela_eventos)
         for evento in estado["eventos"]:
@@ -648,10 +722,18 @@ class Aplicacao:
         if tarefa is None:
             self.detalhe.set("Crie uma tarefa ou selecione uma linha do TCB para consultar suas instâncias.")
         else:
+            vinculos = (f"Servidor: {valor_visivel(tarefa.get('servidor'))} · "
+                        f"cliente: {valor_visivel(tarefa.get('cliente'))}.")
+            reserva = (f" Reserva C/P = {texto(tarefa['duracao'])}/{texto(tarefa['periodo'])}; "
+                       f"saldo: {valor_visivel(tarefa.get('capacidade'))}; "
+                       f"reposições (instante: +capacidade): {texto_reposicoes(tarefa)}."
+                       if tarefa.get("tipo") == "servidor" else "")
             self.detalhe.set(
-                f"{tarefa['id']} · chave {tarefa['chave']} · {ESTADOS.get(tarefa['estado'], tarefa['estado'])}\n"
+                f"{tarefa['id']} · {nome_tipo(tarefa)} · chave {tarefa['chave']} · {ESTADOS.get(tarefa['estado'], tarefa['estado'])}\n"
+                f"{vinculos}{reserva}\n"
                 f"Definição atual: duração {texto(tarefa['duracao'])}, período {texto(tarefa['periodo'])}, prazo relativo {texto(tarefa['prazo'])}. "
-                "Tempos editados valem para novas instâncias; as liberadas mantêm duração, deadline e período/prioridade RM abaixo.")
+                "A API reavalia alterações temporais; instâncias liberadas preservam os tempos abaixo.\n"
+                + texto_admissao(self.estado))
             for i in tarefa["instancias"]:
                 self._inserir(self.instancias, (i["numero"], i["ativacao"], i["deadline"], i["duracao"],
                     i["executado"], max(0, i["duracao"] - i["executado"]), valor_visivel(i["fim"]),
@@ -921,13 +1003,13 @@ class DialogoTarefa(tk.Toplevel):
             dados.update(cor=cor, ingresso=aplicacao.estado["tempo"])
         else:
             dados = tarefa
-        rotulos = (("id", "Identificador", "Texto livre; deve ser único."),
+        rotulos = (("id", "Identificador", "Único. BSxx, PSxx, DSxx e SSxx definem servidores (ex.: DS01); caixa indiferente."),
                    ("cor", "Cor RGB", "Seis dígitos hexadecimais; cor distinta."),
                    ("ingresso", "Ingresso", "Tick de chegada; não reescreve uma chegada passada."),
-                   ("duracao", "Duração", "Ticks necessários por instância; zero é permitido."),
-                   ("periodo", "Período", "Intervalo de ativações; zero = aperiódica, ignorada com aviso."),
+                   ("duracao", "Duração / C", "Ticks por instância; no servidor, capacidade C > 0."),
+                   ("periodo", "Período / P", "> 0: periódica; = 0: aperiódica; < 0: esporádica. Servidor exige P > 0; reserva C/P."),
                    ("prazo", "Prazo relativo", "Deadline = ativação + prazo; pode diferir do período."),
-                   ("eventos", "Lista de eventos", "Preservada como texto; não executada no Projeto A."))
+                   ("eventos", "Offsets esporádicos", "Deslocamentos desde o ingresso, crescentes e separados por pelo menos |período|; ex.: 0, 5, 12 para -5."))
         for linha, (chave, titulo, ajuda) in enumerate(rotulos):
             ttk.Label(corpo, text=titulo + ":").grid(row=linha, column=0, sticky="w", pady=5)
             variavel = tk.StringVar(self, texto(dados[chave]))
@@ -942,10 +1024,12 @@ class DialogoTarefa(tk.Toplevel):
         ttk.Button(corpo, text="Escolher cor…", command=self.escolher_cor).grid(row=7, column=2, sticky="w")
         self.campos["cor"].trace_add("write", self._cor)
         self._cor()
-        explicacao = ("As instâncias liberadas preservam duração, deadline e período/prioridade RM. Alterar o período afeta ativações futuras. "
-                      "A API valida as alterações e informa sua abrangência." if tarefa else
+        explicacao = ("As instâncias liberadas preservam seus tempos. A API valida edições temporais e pode recusá-las "
+                      "em reservas já iniciadas ou esporádicas já liberadas." if tarefa else
                       "Padrões: ingresso no tempo atual, duração 1, período 5 e prazo 5. "
-                      "O experimento considera dez conclusões por tarefa periódica.")
+                      "São dez ocorrências periódicas, uma aperiódica ou a lista de esporádicas.")
+        explicacao += (" BS usa a sobra de CPU; PS perde saldo ocioso; DS conserva no período; SS repõe o consumo. "
+                       "Servidores exigem prazo > 0. Admissão verifica a carga finita conhecida; intervenções manuais são sinalizadas.")
         ttk.Label(corpo, text=explicacao, wraplength=610).grid(row=8, column=0, columnspan=3, sticky="w", pady=10)
         botoes = ttk.Frame(corpo)
         botoes.grid(row=9, column=0, columnspan=3, sticky="e")
@@ -973,7 +1057,7 @@ class DialogoTarefa(tk.Toplevel):
         try:
             for chave, titulo in (("ingresso", "Ingresso"), ("duracao", "Duração"),
                                   ("periodo", "Período"), ("prazo", "Prazo relativo")):
-                dados[chave] = inteiro(dados[chave], titulo)
+                dados[chave] = inteiro(dados[chave], titulo, minimo=None if chave == "periodo" else 0)
             dados["id"] = dados["id"].strip()
             dados["cor"] = dados["cor"].strip().lstrip("#").upper()
             if not dados["id"]:

@@ -1,0 +1,7 @@
+# SS: A executa em [9,10) e [12,13); P preempta em [10,12).
+# As duas unidades de A são repostas juntas em t=29 (9+20).
+RM;0;1
+P;2563EB;0;2;10;10
+SS1;9333EA;0;5;20;20
+A;15803D;9;2;0;20
+E;B45309;16;2;-20;20;0,22,45

@@ -1,0 +1,6 @@
+# BS usa apenas a folga deixada pelas periódicas.
+RM;0;1
+P;2563EB;0;2;10;10
+BS1;9333EA;0;2;5;5
+A;15803D;1;2;0;10
+E;B45309;3;1;-12;10;0,12,25

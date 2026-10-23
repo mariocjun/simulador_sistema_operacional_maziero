@@ -14,6 +14,7 @@ from escalonadores import ALGORITMOS
 from historico import HistoricoSimulacao
 from modelos import EstadoSimulacao, Tarefa
 import motor
+import admissao
 
 
 def _validar_inteiro(valor, campo, minimo=0):
@@ -32,11 +33,22 @@ def _normalizar_e_validar_definicao(dados):
         raise ErroSimulacao("ID não pode conter ponto e vírgula ou caracteres de controle.")
     if not isinstance(dados.cor, str) or not re.fullmatch(r"[0-9A-Fa-f]{6}", dados.cor.strip()):
         raise ErroSimulacao("Cor: use seis dígitos RGB hexadecimais, por exemplo 2563EB.")
-    for campo in ("ingresso", "duracao", "periodo", "prazo"):
+    for campo in ("ingresso", "duracao", "prazo"):
         _validar_inteiro(getattr(dados, campo), campo)
+    if type(dados.periodo) is not int:
+        raise ErroSimulacao("Período: informe inteiro; negativo indica tarefa esporádica.")
     if not isinstance(dados.eventos, str):
         raise ErroSimulacao("Lista de eventos deve ser um texto.")
-    return replace(dados, id=dados.id.strip(), cor=dados.cor.strip().upper())
+    dados = replace(dados, id=dados.id.strip(), cor=dados.cor.strip().upper(), eventos=dados.eventos.strip())
+    dados.deslocamentos()
+    if dados.tipo_servidor:
+        if dados.periodo <= 0 or dados.duracao <= 0 or dados.prazo <= 0:
+            raise ErroSimulacao(f"{dados.id}: servidor exige período, capacidade (duração) e prazo positivos.")
+        if dados.tipo_servidor != "BS" and dados.duracao > min(dados.periodo, dados.prazo):
+            raise ErroSimulacao(f"{dados.id}: capacidade não pode exceder período ou prazo da reserva.")
+    if dados.periodo >= 0 and dados.eventos:
+        raise ErroSimulacao(f"{dados.id}: lista de eventos no Projeto B informa somente ocorrências esporádicas (período negativo).")
+    return dados
 
 
 def _validar_ids_e_cores_unicos(definicoes):
@@ -46,17 +58,16 @@ def _validar_ids_e_cores_unicos(definicoes):
         if dados.id.casefold() in ids:
             raise ErroSimulacao(f"ID repetido: {dados.id}.")
         ids.add(dados.id.casefold())
-        if dados.periodo > 0:
-            if dados.cor in cores:
-                raise ErroSimulacao(f"Cor repetida: {dados.cor}. Cada tarefa deve ter uma cor distinta.")
-            cores.add(dados.cor)
+        if dados.cor in cores:
+            raise ErroSimulacao(f"Cor repetida: {dados.cor}. Cada tarefa deve ter uma cor distinta.")
+        cores.add(dados.cor)
 
 
 def _validar_mudanca_de_estado(tarefa, nome, cpu, quantidade_cpus):
     """Verificar a transição para um nome já validado, sem modificar a tarefa."""
     if tarefa.terminou():
         raise ErroSimulacao("Tarefa encerrada; retroceda ou reinicie para mudar seu estado.")
-    if nome == "nova" and tarefa.instancias:
+    if nome == "nova" and tarefa.chegou:
         raise ErroSimulacao("A tarefa já chegou; retroceda para o estado nova.")
     if nome in {"pronta", "executando"} and not tarefa.instancias_pendentes():
         raise ErroSimulacao(f"Não há instância pronta; próxima ativação: {tarefa.proxima_ativacao}. Use aguardando para retomar.")
@@ -94,15 +105,11 @@ class SimuladorAPI:
         estado = EstadoSimulacao(algoritmo, configuracao.quantum, [None] * configuracao.cpus)
         avisos = []
         for dados in definicoes:
-            if dados.eventos.strip():
-                avisos.append(f"{dados.id}: lista de eventos não executada no Projeto A (item 3.3.5).")
-            if dados.periodo == 0:
-                avisos.append(f"{dados.id}: tarefa aperiódica ignorada (item 4.4).")
-                continue
             estado.tarefas.append(Tarefa(estado.proxima_chave, dados, dados.ingresso))
             estado.proxima_chave += 1
         eventos = motor.processar_eventos_do_instante(estado)
         sorteador = Random(self._semente)
+        estado.admissao = admissao.verificar(estado, self._algoritmos[algoritmo], sorteador)
         self._inicial = replace(configuracao, algoritmo=algoritmo, tarefas=definicoes)
         self._estado, self._sorteador, self._avisos = estado, sorteador, avisos
         self._historico = HistoricoSimulacao(
@@ -111,15 +118,17 @@ class SimuladorAPI:
 
     def _situacao(self):
         """Distinguir conclusão de bloqueio que exige intervenção humana."""
-        tarefas_ativas = [tarefa for tarefa in self._estado.tarefas if not tarefa.terminou()]
+        tarefas_ativas = [tarefa for tarefa in self._estado.tarefas if not tarefa.servidor and not tarefa.terminou()]
         if not tarefas_ativas:
             return "concluida", "Todas as tarefas terminaram; não há trabalho executável."
         for tarefa in tarefas_ativas:
             # Ativações de duração zero podem concluir sem usar CPU, mesmo suspensas.
             ainda_libera_sem_cpu = tarefa.definicao.duracao == 0 and tarefa.pode_liberar_mais_instancias()
-            if not tarefa.suspensa or ainda_libera_sem_cpu:
+            servidor_disponivel = tarefa.definicao.periodo > 0 or any(
+                t.servidor and not t.suspensa and not t.encerrada_manualmente for t in self._estado.tarefas)
+            if (not tarefa.suspensa and servidor_disponivel) or ainda_libera_sem_cpu:
                 return "em_andamento", ""
-        return "interrompida", "As tarefas restantes estão suspensas. Retome uma tarefa para continuar."
+        return "interrompida", "Não há tarefa ou servidor disponível para continuar. Retome uma tarefa/servidor."
 
     def consultar_estado(self):
         """Construir uma resposta independente: o front-end não recebe objetos do motor."""
@@ -130,6 +139,7 @@ class SimuladorAPI:
                         cpus=list(estado.cpus), situacao=situacao, motivo=motivo,
                         avisos=list(self._avisos), pode_voltar=self._historico.pode_voltar(),
                         pode_refazer=self._historico.pode_refazer(),
+                        admissao=deepcopy(estado.admissao),
                         tarefas=[], quadros=[], eventos=[])
         for tarefa in estado.tarefas:
             dados = asdict(tarefa.definicao)
@@ -141,6 +151,11 @@ class SimuladorAPI:
                          concluidas=tarefa.quantidade_instancias_concluidas(), liberadas=len(tarefa.instancias),
                          pendentes=len(tarefa.instancias_pendentes()),
                          proxima_ativacao=proxima_ativacao,
+                         meta_instancias=tarefa.meta_instancias(),
+                         encerrada_manualmente=tarefa.encerrada_manualmente,
+                         capacidade=tarefa.servidor.capacidade if tarefa.servidor else None,
+                         reposicoes=list(tarefa.servidor.reposicoes) if tarefa.servidor else [],
+                         **motor.dados_de_atendimento(estado, tarefa),
                          instancias=[asdict(item) for item in tarefa.instancias])
             resposta["tarefas"].append(dados)
         resposta["eventos"], resposta["quadros"] = self._historico.consultar_registros()
@@ -191,11 +206,13 @@ class SimuladorAPI:
         """Voltar aos parâmetros da última configuração carregada, descartando edições."""
         return self.configurar(self._inicial)
 
-    def _editar(self, operacao):
+    def _editar(self, operacao, *, verificar_admissao=False):
         """Transação simples: editar uma cópia e publicar somente depois do sucesso."""
         novo = deepcopy(self._estado)
         eventos, avisos = operacao(novo)
         eventos.extend(motor.processar_eventos_do_instante(novo))
+        if verificar_admissao:
+            novo.admissao = admissao.verificar(novo, self._algoritmos[novo.algoritmo], self._sorteador)
         self._estado = novo
         self._avisos = list(dict.fromkeys(self._avisos + avisos))
         self._historico.editar_atual(
@@ -233,7 +250,7 @@ class SimuladorAPI:
             eventos.append(dict(tempo=estado.tempo, chave=0, tarefa="Sistema", tipo="manual",
                                 detalhe=f"Parâmetros: {alteracoes}", cpu=None))
             return eventos, []
-        return self._editar(aplicar)
+        return self._editar(aplicar, verificar_admissao=bool({"algoritmo", "cpus"} & set(alteracoes)))
 
     def adicionar_tarefa(self, dados):
         """Uma chegada criada durante a simulação não pode ser colocada no passado."""
@@ -242,14 +259,11 @@ class SimuladorAPI:
             _validar_ids_e_cores_unicos([t.definicao for t in estado.tarefas] + [dados])
             if dados.ingresso < estado.tempo:
                 raise ErroSimulacao("Ingresso da nova tarefa não pode ficar no passado.")
-            if dados.periodo == 0:
-                return [], [f"{dados.id}: tarefa aperiódica ignorada (item 4.4)."]
             tarefa = Tarefa(estado.proxima_chave, dados, dados.ingresso)
             estado.proxima_chave += 1
             estado.tarefas.append(tarefa)
-            avisos = [f"{dados.id}: lista de eventos não executada no Projeto A."] if dados.eventos else []
-            return [motor.evento(estado, tarefa, "manual", "Tarefa adicionada")], avisos
-        return self._editar(aplicar)
+            return [motor.evento(estado, tarefa, "manual", "Tarefa adicionada após teste de admissão")], []
+        return self._editar(aplicar, verificar_admissao=True)
 
     def editar_tarefa(self, chave, **alteracoes):
         """Instâncias liberadas preservam seus tempos e prioridade RM originais."""
@@ -260,22 +274,33 @@ class SimuladorAPI:
             tarefa = self._tarefa(estado, chave)
             nova = _normalizar_e_validar_definicao(replace(tarefa.definicao, **alteracoes))
             _validar_ids_e_cores_unicos([nova if t.chave == chave else t.definicao for t in estado.tarefas])
-            if nova.periodo == 0:
-                raise ErroSimulacao("Uma tarefa periódica existente não pode virar aperiódica; use término manual.")
+            if nova.tipo != tarefa.definicao.tipo or nova.tipo_servidor != tarefa.definicao.tipo_servidor:
+                raise ErroSimulacao("Não é possível trocar o tipo de uma tarefa existente; encerre-a e adicione outra.")
+            temporais = {campo for campo in ("duracao", "prazo", "periodo", "ingresso", "eventos")
+                         if getattr(nova, campo) != getattr(tarefa.definicao, campo)}
+            if tarefa.servidor and tarefa.servidor.inicializado and temporais:
+                raise ErroSimulacao("Reserva de servidor já iniciada: reinicie ou crie outro servidor para mudar seus tempos.")
+            if tarefa.definicao.periodo < 0 and tarefa.instancias and temporais:
+                raise ErroSimulacao("Ocorrências esporádicas já liberadas: reinicie para alterar sua lista ou seus tempos.")
             if nova.ingresso != tarefa.definicao.ingresso:
-                if tarefa.instancias or nova.ingresso < estado.tempo:
+                if tarefa.chegou or nova.ingresso < estado.tempo:
                     raise ErroSimulacao("Não é possível reescrever um ingresso passado.")
                 tarefa.proxima_ativacao = nova.ingresso
-            if nova.periodo != tarefa.definicao.periodo and tarefa.instancias:
+            if nova.periodo > 0 and nova.periodo != tarefa.definicao.periodo and tarefa.instancias:
                 tarefa.proxima_ativacao = estado.tempo + nova.periodo
             tarefa.definicao = nova
+            if not tarefa.instancias and not tarefa.servidor and nova.periodo < 0:
+                tarefa.proxima_ativacao = nova.ingresso + nova.deslocamentos()[0]
+                if tarefa.proxima_ativacao < estado.tempo:
+                    raise ErroSimulacao("Uma edição não pode introduzir ocorrência esporádica no passado.")
+            if tarefa.servidor and not tarefa.servidor.inicializado:
+                tarefa.servidor.proxima_reposicao = nova.ingresso
+                tarefa.servidor.deadline = nova.ingresso + nova.prazo
             avisos = []
             if {"duracao", "prazo", "periodo"} & set(alteracoes):
                 avisos.append(f"{nova.id}: alterações temporais valem para ativações futuras; instâncias liberadas preservadas.")
-            if nova.eventos:
-                avisos.append(f"{nova.id}: lista de eventos não executada no Projeto A.")
             return [motor.evento(estado, tarefa, "manual", f"Edição: {alteracoes}")], avisos
-        return self._editar(aplicar)
+        return self._editar(aplicar, verificar_admissao=bool({"duracao", "prazo", "periodo", "ingresso", "eventos"} & set(alteracoes)))
 
     def alterar_estado(self, chave, estado, cpu=None):
         """Intervenção visível e reversível. A próxima seleção volta a obedecer RM/EDF."""
@@ -284,6 +309,18 @@ class SimuladorAPI:
             raise ErroSimulacao(f"Estado desconhecido: {estado}.")
         def aplicar(atual):
             tarefa = self._tarefa(atual, chave)
+            # Também vale para o retorno antecipado de retomada do servidor.
+            atual.admissao = dict(aceita=None, metodo="Intervenção manual", tempo_final=None,
+                                 detalhe="O estado foi alterado manualmente; a previsão anterior não se aplica.")
+            if tarefa.servidor and nome in {"pronta", "aguardando", "executando"}:
+                if nome == "executando":
+                    raise ErroSimulacao("O servidor só executa com pedido e capacidade; use pronta para retomá-lo e avance um tick.")
+                if tarefa.encerrada_manualmente:
+                    raise ErroSimulacao("Servidor encerrado; retroceda ou reinicie.")
+                tarefa.suspensa = False
+                return [motor.evento(atual, tarefa, "manual", "Servidor retomado")], []
+            if nome == "executando" and tarefa.definicao.periodo <= 0:
+                raise ErroSimulacao("Pedido aperiódico/esporádico executa somente através de um servidor; use pronta.")
             _validar_mudanca_de_estado(tarefa, nome, cpu, len(atual.cpus))
             eventos = []
             for indice, ocupante in enumerate(atual.cpus):

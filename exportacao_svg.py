@@ -23,7 +23,13 @@ _EVENTOS = {
     "sorteio": ("Sorteio", "M 0,-6 V 6 M -6,0 H 6 M -4,-4 L 4,4 M -4,4 L 4,-4", "#7E22CE"),
     "prazo": ("Perda de prazo", "M -5,-5 L 5,5 M -5,5 L 5,-5", "#DC2626"),
     "manual": ("Intervenção manual", "M 0,-6 V 3 M -1,6 H 1", "#A21CAF"),
+    "reposicao": ("Reposição de capacidade", "M 0,-6 V 6 M -6,0 H 6", "#0369A1"),
+    "esgotamento": ("Capacidade esgotada", "M -4,-4 H 4 V 4 H -4 Z M -6,6 L 6,-6", "#B45309"),
+    "atendimento": ("Atendimento de cliente", "M -6,0 H 6 M 1,-5 L 6,0 L 1,5", "#047857"),
+    "devolucao": ("Devolução de cliente", "M 6,-5 V 3 H -6 M -1,-2 L -6,3 L -1,8", "#7E22CE"),
 }
+_TIPOS = {"periodica": "Periódica", "aperiodica": "Aperiódica",
+          "esporadica": "Esporádica", "servidor": "Servidor"}
 
 
 def _numero(valor: int) -> str:
@@ -72,8 +78,13 @@ def _juntar(faixas, chave, inicio, assinatura):
         segmentos.append([inicio, inicio + 1, assinatura])
 
 
-def _estilo(estado, cor):
+def _estilo(estado, cor, tipo="periodica"):
     if estado == "executando":
+        if tipo == "servidor":
+            return {"fill": "#" + cor, "stroke": "#0F172A", "stroke_width": 2}
+        if tipo in {"aperiodica", "esporadica"}:
+            return {"fill": "url(#cliente-" + cor + ")", "stroke": "#" + cor,
+                    "stroke_width": 2, "stroke_dasharray": "4 2"}
         return {"fill": "#" + cor, "stroke": "#334155"}
     if estado == "pronta":
         return {"fill": "none", "stroke": "#475569"}
@@ -88,6 +99,24 @@ def _estilo(estado, cor):
 
 def _marcador(pai, tipo, x, y, **atributos):
     return _elemento(pai, "use", href="#evento-" + tipo, x=x, y=y, **atributos)
+
+
+def _vinculo(tipo, tipo_servidor, servidor, cliente):
+    """Descreve os papéis do quadro histórico, sem consultar o TCB atual."""
+    partes = [_TIPOS.get(tipo, tipo)]
+    if tipo_servidor:
+        partes.append(tipo_servidor)
+    if servidor is not None:
+        partes.append("servidor: " + str(servidor))
+    if cliente is not None:
+        partes.append("cliente: " + str(cliente))
+    return " · ".join(partes)
+
+
+def _borda_servidor(pai, x, y, largura, altura):
+    # Borda dupla preserva a cor do servidor, mesmo em impressão sem cores.
+    _elemento(pai, "rect", x=x + 3, y=y + 3, width=largura - 6, height=altura - 6,
+              fill="none", stroke="#FFFFFF", pointer_events="none")
 
 
 def gerar_svg(estado: dict) -> str:
@@ -123,7 +152,7 @@ def gerar_svg(estado: dict) -> str:
     for (chave, _), quantidade in simultaneos.items():
         alturas[chave] = max(alturas[chave], quantidade * 14 + 40)
     linhas = {}
-    y = 110
+    y = 164  # Reservar uma faixa exclusiva para a contagem de perdas no cabeçalho.
     for chave in chaves:
         linhas[chave] = y
         y += alturas[chave]
@@ -134,7 +163,8 @@ def gerar_svg(estado: dict) -> str:
         y += 44
     eixo = y + 20
     legenda = eixo + 62
-    altura = legenda + 210
+    base_estados = legenda + 32 + ((len(_EVENTOS) + 3) // 4) * 25
+    altura = base_estados + 125
     raiz = ET.Element("svg", {
         "xmlns": "http://www.w3.org/2000/svg", "version": "1.1",
         "width": _numero(largura), "height": _numero(altura),
@@ -143,16 +173,32 @@ def gerar_svg(estado: dict) -> str:
         "font-family": "sans-serif", "font-size": "12",
     })
     encerrada = estado.get("situacao") == "concluida"
-    manual = encerrada and any(t.get("estado") == "terminada" and t.get("concluidas", 10) < 10
+    manual = encerrada and any(t.get("encerrada_manualmente", False)
                                for t in estado.get("tarefas", []))
-    titulo = "Simulação encerrada manualmente" if manual else (
-        "Simulação concluída" if encerrada else "Simulação parcial")
+    titulo = "Projeto B — " + ("Simulação encerrada manualmente" if manual else (
+        "Simulação concluída" if encerrada else "Simulação parcial"))
+    # Eventos pertencem ao histórico recebido, inclusive em exportações parciais.
+    perdas = sum(evento["tipo"] == "prazo" for evento in eventos)
+    prazos = f"{_numero(perdas)} {'perda' if perdas == 1 else 'perdas'} de prazo"
+    titulo += " — " + prazos
     _elemento(raiz, "title", titulo, id="titulo")
     _elemento(raiz, "desc", "Histórico completo do estado recebido; tarefas em ID decrescente e faixas de todas as CPUs.", id="descricao")
     _elemento(raiz, "rect", width=largura, height=altura, fill="#FFFFFF")
     _elemento(raiz, "text", titulo, x=20, y=30, font_size=20, font_weight="bold")
     _elemento(raiz, "text", f"{estado.get('algoritmo', '')} · tempo: {_numero(estado.get('tempo', 0))} · CPUs: {_numero(quantidade_cpus)}", x=20, y=52)
     _elemento(raiz, "text", estado.get("motivo", ""), x=20, y=72)
+    admissao = estado.get("admissao")
+    if admissao:
+        resultado = {True: "aceita", False: "recusada", None: "não avaliada"}.get(admissao.get("aceita"), "não avaliada")
+        final = admissao.get("tempo_final")
+        info = _elemento(raiz, "text", f"Admissão {resultado} · {admissao.get('metodo', '')} · fim previsto: "
+                         + ("—" if final is None else _numero(final)), x=20, y=92)
+        _elemento(info, "title", admissao.get("detalhe", ""))
+    _elemento(raiz, "rect", x=20, y=108, width=largura - 40, height=36, rx=5,
+              fill="#FEF2F2" if perdas else "#F1F5F9")
+    _elemento(raiz, "text", ("ATENÇÃO: " if perdas else "") + prazos,
+              id="resumo-prazos", x=32, y=132, font_size=18, font_weight="bold",
+              fill="#B91C1C" if perdas else "#0F172A")
     defs = _elemento(raiz, "defs")
     padrao = _elemento(defs, "pattern", id="suspensa", width=6, height=6, patternUnits="userSpaceOnUse")
     _elemento(padrao, "rect", width=6, height=6, fill="#FFFFFF")
@@ -160,6 +206,15 @@ def gerar_svg(estado: dict) -> str:
     padrao = _elemento(defs, "pattern", id="cpu-desligada", width=8, height=8, patternUnits="userSpaceOnUse")
     _elemento(padrao, "rect", width=8, height=8, fill="#F1F5F9")
     _elemento(padrao, "path", d="M -2,2 L 2,-2 M 0,8 L 8,0 M 6,10 L 10,6", stroke="#94A3B8", stroke_width=1)
+    # Clientes conservam seu RGB em pontos; o fundo claro contrasta com reservas.
+    cores_clientes = {"2563EB"} | {
+        tarefa["cor"] for quadro in quadros for tarefa in quadro["tarefas"]
+        if tarefa.get("tipo") in {"aperiodica", "esporadica"}
+    }
+    for cor in sorted(cores_clientes):
+        padrao = _elemento(defs, "pattern", id="cliente-" + cor, width=6, height=6, patternUnits="userSpaceOnUse")
+        _elemento(padrao, "rect", width=6, height=6, fill="#FFFFFF")
+        _elemento(padrao, "circle", cx=3, cy=3, r=1.5, fill="#" + cor)
     for tipo, (rotulo, desenho, cor) in _EVENTOS.items():
         simbolo = _elemento(defs, "g", id="evento-" + tipo)
         _elemento(simbolo, "path", d=desenho, fill="none", stroke=cor, stroke_width=2, stroke_linecap="round", stroke_linejoin="round")
@@ -170,15 +225,25 @@ def gerar_svg(estado: dict) -> str:
     grade = _elemento(raiz, "g", id="eixos")
     for tempo in ticks:
         x = esquerda + tempo * _PASSO
-        _elemento(grade, "line", x1=x, y1=94, x2=x, y2=eixo, stroke="#E2E8F0")
+        _elemento(grade, "line", x1=x, y1=148, x2=x, y2=eixo, stroke="#E2E8F0")
         _elemento(grade, "text", _numero(tempo), x=x, y=eixo + 19, text_anchor="middle", data_tick=tempo)
     _elemento(grade, "line", x1=esquerda, x2=direita, y1=eixo, y2=eixo, stroke="#334155")
     _elemento(grade, "text", "Tempo (ticks)", x=esquerda, y=eixo + 38)
     grupos = {}
     for chave in chaves:
-        grupo = _elemento(raiz, "g", data_linha="tarefa", data_chave=chave, data_id=tarefas[chave]["id"])
+        tarefa = tarefas[chave]
+        grupo = _elemento(raiz, "g", data_linha="tarefa", data_chave=chave, data_id=tarefa["id"])
         grupos[chave] = grupo
-        _elemento(grupo, "text", tarefas[chave]["id"], x=esquerda - 16, y=linhas[chave] + alturas[chave] - 8, text_anchor="end")
+        rotulo = _elemento(grupo, "text", tarefa["id"], x=esquerda - 16, y=linhas[chave] + alturas[chave] - 8, text_anchor="end")
+        detalhe = _vinculo(tarefa.get("tipo", "periodica"), tarefa.get("tipo_servidor", ""),
+                           tarefa.get("servidor"), tarefa.get("cliente"))
+        if tarefa.get("tipo") == "servidor":
+            saldo = tarefa.get("capacidade")
+            reposicoes = "; ".join(f"t={_numero(t)}: +{_numero(c)}" for t, c in tarefa.get("reposicoes", [])) or "nenhuma"
+            detalhe += " · saldo: " + ("—" if saldo is None else _numero(saldo)) + " · reposições: " + reposicoes
+            if "duracao" in tarefa and "periodo" in tarefa:
+                detalhe += f" · C/P: {_numero(tarefa['duracao'])}/{_numero(tarefa['periodo'])}"
+        _elemento(rotulo, "title", detalhe)
     grupos_cpu = {}
     for cpu, y in linhas_cpu.items():
         grupos_cpu[cpu] = _elemento(raiz, "g", data_linha="cpu", data_cpu=cpu)
@@ -193,20 +258,29 @@ def gerar_svg(estado: dict) -> str:
         for chave, tarefa in miniaturas.items():
             _juntar(faixas_tarefas, chave, tempo, (
                 tarefa["estado"], tarefa["cor"], tarefa["cpu"], tarefa["id"],
+                tarefa.get("tipo", "periodica"), tarefa.get("tipo_servidor", ""),
+                tarefa.get("servidor"), tarefa.get("cliente"),
             ))
         for cpu, chave in enumerate(quadro["cpus"], 1):
             tarefa = miniaturas.get(chave, tarefas.get(chave, {}))
             _juntar(faixas_cpus, cpu, tempo, (
                 chave, tarefa.get("cor", "64748B"), tarefa.get("id", ""),
+                tarefa.get("tipo", "periodica"), tarefa.get("tipo_servidor", ""),
+                tarefa.get("servidor"), tarefa.get("cliente"),
             ))
 
     for chave, segmentos in faixas_tarefas.items():
         y = linhas[chave] + alturas[chave] - 22
-        for inicio, final, (situacao, cor, cpu, identidade) in segmentos:
+        for inicio, final, (situacao, cor, cpu, identidade, tipo, tipo_servidor, servidor, cliente) in segmentos:
             x = esquerda + inicio * _PASSO
+            largura_faixa = (final - inicio) * _PASSO
             retangulo = _elemento(grupos[chave], "rect", x=x, y=y, width=(final - inicio) * _PASSO, height=18,
-                                  data_inicio=inicio, data_fim=final, data_estado=situacao, **_estilo(situacao, cor))
-            _elemento(retangulo, "title", f"{identidade}: {situacao} [{_numero(inicio)}, {_numero(final)})")
+                                  data_inicio=inicio, data_fim=final, data_estado=situacao, data_tipo=tipo,
+                                  data_servidor=servidor or "", data_cliente=cliente or "", **_estilo(situacao, cor, tipo))
+            _elemento(retangulo, "title", f"{identidade}: {situacao} [{_numero(inicio)}, {_numero(final)}) · "
+                      + _vinculo(tipo, tipo_servidor, servidor, cliente))
+            if situacao == "executando" and tipo == "servidor":
+                _borda_servidor(grupos[chave], x, y, largura_faixa, 18)
             if situacao == "executando" and cpu is not None:
                 # Acima da barra, o número também é legível para RGB preto.
                 rotulo = f"CPU {_numero(cpu)}"
@@ -214,12 +288,21 @@ def gerar_svg(estado: dict) -> str:
                 _elemento(grupos[chave], "text", rotulo, x=x + 2, y=y - 3, font_size=10, data_cpu=cpu,
                           textLength=largura_rotulo, lengthAdjust="spacingAndGlyphs")
     for cpu, segmentos in faixas_cpus.items():
-        for inicio, final, (chave, cor, identidade) in segmentos:
-            retangulo = _elemento(grupos_cpu[cpu], "rect", x=esquerda + inicio * _PASSO, y=linhas_cpu[cpu] + 10,
-                                  width=(final - inicio) * _PASSO, height=20, stroke="#64748B",
-                                  fill="url(#cpu-desligada)" if chave is None else "#" + cor,
-                                  data_inicio=inicio, data_fim=final, data_estado="desligada" if chave is None else "executando")
-            _elemento(retangulo, "title", f"CPU {_numero(cpu)}: " + ("desligada" if chave is None else str(identidade)))
+        for inicio, final, (chave, cor, identidade, tipo, tipo_servidor, servidor, cliente) in segmentos:
+            x, y = esquerda + inicio * _PASSO, linhas_cpu[cpu] + 10
+            largura_faixa = (final - inicio) * _PASSO
+            estilo = {"fill": "url(#cpu-desligada)", "stroke": "#64748B"} if chave is None else _estilo("executando", cor, tipo)
+            retangulo = _elemento(grupos_cpu[cpu], "rect", x=x, y=y, width=largura_faixa, height=20,
+                                  data_inicio=inicio, data_fim=final, data_estado="desligada" if chave is None else "executando",
+                                  data_tipo=tipo, data_cliente=cliente or "", **estilo)
+            rotulo = f"{identidade} → {cliente}" if cliente is not None else str(identidade)
+            _elemento(retangulo, "title", f"CPU {_numero(cpu)}: " + ("desligada" if chave is None else rotulo))
+            if chave is not None:
+                if tipo == "servidor":
+                    _borda_servidor(grupos_cpu[cpu], x, y, largura_faixa, 20)
+                # Acima da faixa, independe do brilho da cor e cabe no intervalo.
+                _elemento(grupos_cpu[cpu], "text", rotulo, x=x + 2, y=y - 3, font_size=10,
+                          textLength=min(len(rotulo) * 6, largura_faixa - 4), lengthAdjust="spacingAndGlyphs")
 
     pilhas = Counter()
     for evento in eventos:
@@ -244,11 +327,18 @@ def gerar_svg(estado: dict) -> str:
         ("terminada", "Após o término"), ("aguardando", "Aguardando ativação"),
     ]
     for indice, (situacao, rotulo) in enumerate(estados_legenda):
-        x, y = 20 + (indice % 3) * 360, legenda + 82 + (indice // 3) * 25
+        x, y = 20 + (indice % 3) * 360, base_estados + (indice // 3) * 25
         _elemento(grupo_legenda, "rect", x=x, y=y, width=20, height=14, **_estilo(situacao, "2563EB"))
         _elemento(grupo_legenda, "text", rotulo, x=x + 28, y=y + 12)
-    _elemento(grupo_legenda, "rect", x=20, y=legenda + 136, width=20, height=14, fill="url(#cpu-desligada)", stroke="#64748B")
-    _elemento(grupo_legenda, "text", "CPU desligada (hachura cinza)", x=48, y=legenda + 148)
+    y = base_estados + 54
+    _elemento(grupo_legenda, "rect", x=20, y=y, width=20, height=14, **_estilo("executando", "2563EB", "servidor"))
+    _borda_servidor(grupo_legenda, 20, y, 20, 14)
+    _elemento(grupo_legenda, "text", "Servidor (borda dupla)", x=48, y=y + 12)
+    _elemento(grupo_legenda, "rect", x=380, y=y, width=20, height=14, **_estilo("executando", "2563EB", "aperiodica"))
+    _elemento(grupo_legenda, "text", "Cliente (cor pontilhada, borda tracejada)", x=408, y=y + 12)
+    _elemento(grupo_legenda, "text", "CPU: servidor → cliente", x=740, y=y + 12)
+    _elemento(grupo_legenda, "rect", x=20, y=y + 28, width=20, height=14, fill="url(#cpu-desligada)", stroke="#64748B")
+    _elemento(grupo_legenda, "text", "CPU desligada (hachura cinza)", x=48, y=y + 40)
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(raiz, encoding="unicode")
 
 
