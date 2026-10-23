@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Build
+build/
+dist/
+*.spec
+
+# Executaveis gerados
+*.exe
+
+# Saidas de execucao, relatorios e graficos gerados
+*.svg
+relatorio.json
+
+# Ambientes virtuais
+.venv/
+venv/
+ENV/
+env/
+
+# Configuracoes de IDEs / Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema operacional
+Thumbs.db
+Desktop.ini
+.DS_Store

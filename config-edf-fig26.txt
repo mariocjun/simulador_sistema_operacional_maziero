@@ -1,0 +1,4 @@
+# Figura 2.6, comparação RM/EDF com as mesmas tarefas.
+EDF;0;1
+A;E6194B;0;10;20;20
+B;4363D8;0;25;50;50

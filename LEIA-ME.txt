@@ -1,0 +1,68 @@
+SIMULADOR RM/EDF — PROJETO A
+
+Como executar:
+
+  Opção 1 — Executar diretamente pelo código-fonte:
+    É necessário Python 3.10 ou superior com Tkinter.
+    Abra um terminal nesta pasta e execute:
+      py main.py   (ou: python main.py)
+    Não há dependências externas (usa apenas a biblioteca padrão do Python).
+
+  Opção 2 — Gerar e executar o executável (.exe) no Windows:
+    1. Dê dois cliques em GERAR-EXECUTAVEL.bat e aguarde a mensagem CONCLUIDO.
+    2. O script detecta automaticamente o Python instalado (py, python, python3 ou pastas comuns do Windows).
+       Na primeira execução, precisa de internet para instalar o PyInstaller no ambiente isolado.
+    3. O executável autocontido Simulador-RM-EDF.exe será gerado diretamente nesta pasta.
+    4. Quem apenas executar o .exe gerado não precisa de Python nem de internet.
+    5. O ambiente de build e arquivos temporários ficam fora desta pasta, mantendo o repositório limpo.
+
+Uso da interface:
+  Clique em "Carregar arquivo" e escolha um dos config-*.txt desta pasta.
+  Use "Passo +1", "Voltar" ou "Completo".
+  O Gantt pode ser salvo em SVG; por padrão ele é gerado diretamente nesta pasta (ou na pasta que você escolher).
+
+Arquivos:
+  .gitignore        — ignora arquivos temporários, caches e executáveis gerados.
+  GERAR-EXECUTAVEL.bat — gera o executável .exe com dois cliques no Windows.
+  main.py           — inicia a aplicação gráfica ou por linha de comando.
+  contratos.py      — configuração, definição de tarefa e contrato público.
+  modelos.py        — tarefa, instância periódica e estado da simulação.
+  escalonadores.py   — escolha por RM/EDF e critérios de desempate.
+  motor.py          — etapas de um tick e eventos de cada instante.
+  historico.py      — registros, voltar/refazer e edições.
+  api.py            — comandos e validações, sem dependência da interface.
+  configuracao.py    — leitura do arquivo de entrada.
+  exportacao_svg.py  — exportação do Gantt.
+  interface_tk.py    — controles, tabelas e apresentação gráfica.
+  projetoA-simulador-escalonamento-v20261015.pdf — especificação oficial de requisitos do Projeto A (Prof. Dr. Marco Aurélio Wehrmeister).
+
+No núcleo, cada objeto responde pelas informações que possui:
+  Tarefa informa qual instância pode executar e se ainda pode liberar outras.
+  EstadoSimulacao localiza tarefas e informa em qual CPU estão.
+  O motor coordena o tick e registra conclusões no instante correto.
+As dez instâncias liberadas não significam dez concluídas. Suspensão impede
+execução, mas não apaga trabalho pendente nem seus prazos.
+
+Cabeçalho: algoritmo;quantum;qtde_cpus
+Tarefa: id;cor;ingresso;duracao;periodo;prazo[;lista_eventos]
+
+Quantum é lido, validado e preservado, sem rodízio em RM/EDF.
+Tick é a unidade do relógio; período determina novas ativações. Nenhum deles
+deve ser confundido com uma fatia de CPU (quantum). Reavaliar a cada tick não
+obriga trocar a tarefa.
+O experimento acompanha as primeiras dez instâncias por tarefa e conserva
+as atrasadas até terminarem. Término manual é uma intervenção distinta.
+Edições temporais afetam ativações futuras, não as instâncias já liberadas.
+
+Marcadores do Gantt:
+Na janela, Ativação marca cada ocorrência liberada e Fim de instância marca
+sua conclusão. No SVG, os nomes são Ativação e Conclusão de instância.
+Chegada indica adicionalmente a primeira ativação; Término da tarefa indica
+o encerramento após dez conclusões. Retomar depois de uma preempção continua
+a mesma ocorrência e não cria uma ativação nova.
+Os eventos são registrados nos seus instantes exatos. A nova ativação não
+apaga uma ocorrência atrasada.
+
+A quantidade de CPUs é configurável.
+
+Todos os arquivos do projeto estão nesta pasta, sem subpastas.
